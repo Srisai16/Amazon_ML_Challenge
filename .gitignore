@@ -1,0 +1,22 @@
+# Environments & Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Datasets & Large Artifacts (Do not push heavy raw data or weights)
+dataset/
+saved_models/
+*.zip
+*.tar.gz
+*.pkl
+*.bin
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
