@@ -39,7 +39,7 @@ def run_test_inference(
     print(">>> Starting Amazon ML Challenge 2026 End-to-End Inference Pipeline")
     print("=" * 80)
 
-    # 1. Load Model
+    # 1. Load Model & Threshold Policy
     ranker = GBDTRanker()
     if os.path.exists(model_path):
         ranker.load(model_path)
@@ -47,8 +47,18 @@ def run_test_inference(
         print(f"Warning: Model not found at {model_path}. Using default threshold {match_threshold}")
         ranker.optimal_threshold = match_threshold
 
-    threshold = match_threshold or ranker.optimal_threshold
-    print(f"Using match decision threshold: {threshold:.3f}")
+    policy_path = os.path.join(os.path.dirname(model_path), "threshold_policy.json")
+    if os.path.exists(policy_path):
+        import json
+        with open(policy_path) as f:
+            policy = json.load(f)
+        t_singleton = float(policy.get("t_singleton", 0.48))
+        t_match = float(policy.get("t_match", 0.52))
+        print(f"Loaded Two-Stage Policy: T_singleton={t_singleton:.3f}, T_match={t_match:.3f} (val F0.5={policy.get('val_f05', 0.0):.4f})")
+    else:
+        t_singleton = 0.48
+        t_match = match_threshold or ranker.optimal_threshold
+        print(f"Using Single Threshold Policy: T_match={t_match:.3f}")
 
     # 2. Setup Test Cache Paths & Entity IDs
     s1_dir = os.path.join(cache_root, "test", "s1")
@@ -113,9 +123,17 @@ def run_test_inference(
                 X_batch = extractor.extract_batch_from_cache(cache_root, "test", q_global, c, v)
                 probs = ranker.predict_proba(X_batch)
 
+                # Two-Stage threshold evaluation per query
+                q_to_cand_probs: Dict[int, List[Tuple[int, float]]] = {i: [] for i in range(b_len)}
                 for local_q, tgt_idx, p in zip(r.tolist(), c.tolist(), probs.tolist()):
-                    if p >= threshold:
-                        matched_per_query[local_q].append(tgt_idx)
+                    q_to_cand_probs[local_q].append((tgt_idx, p))
+
+                for local_q, pairs in q_to_cand_probs.items():
+                    if not pairs:
+                        continue
+                    max_p = max(p for _, p in pairs)
+                    if max_p >= t_singleton:
+                        matched_per_query[local_q] = [tgt for tgt, p in pairs if p >= t_match]
 
             # Write results for each query in this block
             for local_i in range(b_len):

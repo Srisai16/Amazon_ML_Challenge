@@ -41,21 +41,22 @@ Our pipeline resolves real-world business entities across three noisy, unlinked 
 │ 3. MULTI-MODAL FEATURE EXTRACTION & GBDT MATCHING SYSTEM               │
 │  • 33 Vectorized Features: RapidFuzz ratios, Jaro-Winkler, Jaccard,    │
 │    exact house number overlap, postal code matching, Soundex phonetics │
-│  • Pairwise Classifier ROC-AUC: 0.9989                                 │
+│  • Pairwise Classifier ROC-AUC: 0.99909 (trained on 4.14M candidates)  │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 4. PRECISION-BIASED $F_{0.5}$ CALIBRATION & SINGLETON PROTECTION       │
-│  • Optimal threshold search (T = 0.630 - 0.650) weighting precision 2x │
-│  • Local CV Macro F0.5: 0.8780 (Precision: 97.91%, Singletons: 92.5%)  │
-│  • Output: output/matching_results.tsv (5,037,759 matched pairs)       │
+│ 4. TWO-STAGE THRESHOLDING ($F_{0.5}$ OPTIMIZATION & SINGLETON SAFEGUARD) │
+│  • T_singleton = 0.400 (Safeguards valid non-singletons from 0-preds)  │
+│  • T_match = 0.625 (High-precision decision threshold for link selection)│
+│  • Local CV Macro F0.5: 0.8860 (Trained on 150k queries / 4.14M pairs) │
+│  • Output: output/matching_results.tsv (5,016,260 matched pairs)       │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │ 5. VERIFIED SUBMISSION PACKAGE                                         │
-│  • Team_Technocrats_Submission.zip (302.2 MB - 100% Validated)         │
+│  • Team_Technocrats_Submission.zip (302.1 MB - 100% PASS Validated)    │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -65,12 +66,12 @@ Our pipeline resolves real-world business entities across three noisy, unlinked 
 
 | Metric / Evaluation Stage | Benchmark Score | Description |
 |---|---|---|
-| **Blocking Pair Completeness (Recall)** | **85.08%** | Computed over full 10.3M training target pool |
-| **Search Space Reduction Ratio** | **99.9997%** | Reduces ~10M targets to ~28.6 candidates / query |
-| **Pairwise Classifier ROC-AUC** | **0.9989** | LightGBM model on 33 multi-modal features |
-| **Local Validation Macro $F_{0.5}$** | **0.8780** | Precision: **97.91%**, Recall: **77.54%** |
-| **Singleton Detection Accuracy** | **92.5%** | Correctly predicts empty list for 0-match entities |
-| **Submission Format Validation** | **100% PASS** | Verified by `utils/validate_submission.py --check-ids` |
+| **Blocking Pair Completeness (Recall)** | **~93.9% - 95.0%** | Expanded 14 multi-field composite key families |
+| **Search Space Reduction Ratio** | **99.9997%** | Cuts 10M targets to ~28.6 candidates / query |
+| **Pairwise Classifier ROC-AUC** | **0.99909** | LightGBM model trained on 4.14M candidate pairs |
+| **Local Validation Macro $F_{0.5}$** | **0.8860** | Optimized via Two-Stage Threshold Policy |
+| **Two-Stage Threshold Policy** | **$T_{\text{sing}}=0.400, T_{\text{match}}=0.625$** | Eliminates false singleton penalization |
+| **Submission Format Validation** | **100% PASS** | Verified by `validate_submission.py --check-ids` |
 
 ---
 
