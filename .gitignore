@@ -10,10 +10,18 @@ __pycache__/
 # Datasets & Large Artifacts (Do not push heavy raw data or weights)
 dataset/
 saved_models/
+cache/
+output/
 *.zip
 *.tar.gz
 *.pkl
 *.bin
+*.npy
+*.tsv
+
+# Logs
+*.log
+*.err.log
 
 # IDE & OS
 .vscode/

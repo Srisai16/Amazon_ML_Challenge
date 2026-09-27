@@ -1,121 +1,117 @@
-# Amazon ML Challenge 2026 - Business Entity Resolution
+# Amazon ML Challenge 2026 - Business Entity Resolution (Team Technocrats)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Evaluation Metric](https://img.shields.io/badge/Metric-Macro%20F0.5-orange.svg)]()
+[![Validation Status](https://img.shields.io/badge/Validation-100%25%20PASS-brightgreen.svg)]()
 
 ## 📌 Executive Summary & Architecture Overview
 
-This repository contains our end-to-end, high-performance, precision-optimized solution for the **Amazon ML Challenge 2026: Business Entity Resolution**.
+This repository contains **Team Technocrats**' end-to-end, high-performance, precision-optimized solution for the **Amazon ML Challenge 2026: Business Entity Resolution**.
 
-The objective is to resolve real-world business entities across three noisy, unlinked sources (`Source 1` reference, `Source 2`, `Source 3`) across multi-country distributions (US, India, France) and optimize for **Macro-averaged $F_{0.5}$ Score** while maintaining a compact candidate blocking space.
+Our pipeline resolves real-world business entities across three noisy, unlinked sources (`Source 1` reference, `Source 2`, `Source 3`) across multi-country distributions (US, India, and zero-shot France in the test set). It optimizes for **Macro-averaged $F_{0.5}$ Score** while delivering an ultra-compact candidate blocking space (~28.6 candidates/query).
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                          RAW INPUT DATASETS                            │
-│  - Source 1 (Reference)    - Source 2 (Noisy)    - Source 3 (Noisy)    │
+│  - Source 1 (Reference: 1.73M test queries, 2.2M train queries)        │
+│  - Source 2 & Source 3 (Target pool: 9.97M test, 10.32M train)         │
 │  Columns: entity_id, business_name, business_address, country          │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 1. ADVANCED MULTI-COUNTRY NORMALIZATION & PREPROCESSING ENGINE         │
-│  • Legal suffix canonicalization (Corp, Pvt Ltd, LLC, SAS, SARL, etc.) │
-│  • Address parsing (street/rd, landmarks, postal codes, pin codes)    │
-│  • Country-agnostic cleaning (US, India, and zero-shot France)         │
+│ 1. HIGH-PERFORMANCE MEMORY-MAPPED NORMALIZATION & ENCODING ENGINE      │
+│  • Legal suffix canonicalization (Corp, Inc, Pvt Ltd, LLC, SAS, SARL)  │
+│  • Address parsing (street, landmarks, postal codes, PIN codes)        │
+│  • C-speed accent folding & open-set country encoding (US, IN, FR)     │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 2. HYBRID HIGH-RECALL MULTI-STAGE BLOCKING / CANDIDATE GENERATION      │
-│  • Fast BM25 / Character n-gram Inverted Indexing                      │
-│  • Dense Bi-Encoder Embeddings (BGE-M3 / MiniLM) + FAISS Indexing      │
-│  • Core Token / Phonetic / Landmark Anchored Blocking                   │
-│  • Output: candidate_pairs.tsv (Target: >97% recall, ~15-25 cand/S1)   │
+│ 2. SCALABLE HYBRID BLOCKING & CANDIDATE GENERATION ENGINE              │
+│  • Multi-field Composite Keys (Full, Sorted, Name+AddrNo, Name+Postal)  │
+│  • Memory-mapped CSR Postings Index with IDF scoring                   │
+│  • Reduction Ratio: 99.9997% | Avg Candidates: ~28.6 per S1 query       │
+│  • Output: output/candidate_pairs.tsv (49,589,236 total candidate pairs)│
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 3. HIGH-PRECISION RERANKING & MATCHING SYSTEM (TWO-TIER ENSEMBLE)      │
-│  Tier A: Deep Cross-Encoder Transformer (DeBERTa-v3-base/large)        │
-│  Tier B: 40+ Advanced Engineered Features + LightGBM / CatBoost Ranker │
-│          (Fuzzy, Phonetic, Address Number Overlap, Token Jaccard)       │
+│ 3. MULTI-MODAL FEATURE EXTRACTION & GBDT MATCHING SYSTEM               │
+│  • 33 Vectorized Features: RapidFuzz ratios, Jaro-Winkler, Jaccard,    │
+│    exact house number overlap, postal code matching, Soundex phonetics │
+│  • Pairwise Classifier ROC-AUC: 0.9989                                 │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 4. $F_{0.5}$ CALIBRATED DECISION & SINGLETON PROTECTION LOGIC          │
-│  • Precision-biased optimal threshold search ($T \approx 0.65 - 0.80$) │
-│  • Singleton safeguard (protecting 1.0 macro reward for 0-matches)     │
-│  • Cross-source transitivity & graph consistency filtering             │
+│ 4. PRECISION-BIASED $F_{0.5}$ CALIBRATION & SINGLETON PROTECTION       │
+│  • Optimal threshold search (T = 0.630 - 0.650) weighting precision 2x │
+│  • Local CV Macro F0.5: 0.8780 (Precision: 97.91%, Singletons: 92.5%)  │
+│  • Output: output/matching_results.tsv (5,037,759 matched pairs)       │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
-│ 5. VALIDATED SUBMISSION OUTPUTS                                        │
-│  • output/matching_results.tsv   (Final Leaderboard Predictions)       │
-│  • output/candidate_pairs.tsv    (Audit Candidate Pool)                │
+│ 5. VERIFIED SUBMISSION PACKAGE                                         │
+│  • Team_Technocrats_Submission.zip (302.2 MB - 100% Validated)         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 👥 Team Work Distribution (4 Members)
+## 🏆 Key Performance Results & Benchmarks
 
-| Member / Role | Focus Area | Key Deliverables |
+| Metric / Evaluation Stage | Benchmark Score | Description |
 |---|---|---|
-| **Member 1 (Lead / ML Architect)** | Pipeline orchestration, Cross-Encoder fine-tuning, Ensembling | `src/models/`, `src/pipeline.py`, Submission validation |
-| **Member 2 (Data & Blocking Specialist)** | Text cleaning, Lexical BM25 & FAISS bi-encoder candidate retrieval | `src/preprocessing/`, `src/blocking/`, `candidate_pairs.tsv` |
-| **Member 3 (Feature Engineering & GBDT)** | String similarities, address parsing, LightGBM/CatBoost ranker | `src/features/`, `src/models/gbdt_ranker.py` |
-| **Member 4 (Evaluation, QA & Documentation)** | Local CV ($F_{0.5}$ metric), ablation studies, final report & zip | `src/evaluation/`, `Documentation_template.md`, CI/QA |
+| **Blocking Pair Completeness (Recall)** | **85.08%** | Computed over full 10.3M training target pool |
+| **Search Space Reduction Ratio** | **99.9997%** | Reduces ~10M targets to ~28.6 candidates / query |
+| **Pairwise Classifier ROC-AUC** | **0.9989** | LightGBM model on 33 multi-modal features |
+| **Local Validation Macro $F_{0.5}$** | **0.8780** | Precision: **97.91%**, Recall: **77.54%** |
+| **Singleton Detection Accuracy** | **92.5%** | Correctly predicts empty list for 0-match entities |
+| **Submission Format Validation** | **100% PASS** | Verified by `utils/validate_submission.py --check-ids` |
 
 ---
 
-## 📂 Project Directory Structure
+## 📂 Repository Directory Structure
 
 ```
 Amazon_ML_Challenge/
 ├── README.md                           # Master project guide & architecture
-├── ROADMAP.md                          # 3-Day sprint milestones & task tracking
-├── Documentation_template.md           # Submission methodology report template
+├── ROADMAP.md                          # Hackathon execution timeline & milestones
+├── Documentation_template.md           # Methodology write-up (Team Technocrats)
 ├── requirements.txt                    # Pinned Python dependencies
-├── dataset/                            # (Place downloaded datasets here)
-│   ├── train/
-│   │   ├── train_source1.tsv
-│   │   ├── train_source2.tsv
-│   │   ├── train_source3.tsv
-│   │   └── train_ground_truth.tsv
-│   └── test/
-│       ├── test_source1.tsv
-│       ├── test_source2.tsv
-│       └── test_source3.tsv
-├── output/                             # Generated submission files
-│   ├── matching_results.tsv
-│   └── candidate_pairs.tsv
+├── Team_Technocrats_Submission.zip     # Verified 302.2 MB final submission package
+├── output/                             # Generated submission TSVs
+│   ├── matching_results.tsv            # Leaderboard match predictions (85.0 MB)
+│   └── candidate_pairs.tsv             # Blocking candidate pool (632.5 MB)
+├── saved_models/
+│   └── gbdt_model.pkl                  # Trained LightGBM model & threshold
 ├── utils/
 │   └── validate_submission.py          # Strict format validator (stdlib)
+├── scripts/
+│   ├── train_ranker.py                 # Training & threshold optimization script
+│   ├── eval_blocking.py                # Blocking recall diagnostic evaluator
+│   ├── package_submission.py           # Submission zip archive builder
+│   ├── quick_key_test.py               # Composite key recall benchmark
+│   └── analyze_misses.py               # Error analysis tool
 └── src/
     ├── __init__.py
-    ├── config.py                       # Global configuration & hyperparameters
+    ├── config.py                       # Global configuration & parameters
     ├── preprocessing/
-    │   ├── __init__.py
-    │   └── normalizer.py               # Robust multi-country text & address cleaners
+    │   └── normalizer.py               # Multi-country business & address normalizer
     ├── blocking/
-    │   ├── __init__.py
-    │   ├── lexical_blocker.py          # BM25 / Inverted Index candidate generator
-    │   ├── dense_blocker.py            # SentenceTransformers + FAISS candidate generator
-    │   └── hybrid_blocker.py           # Multi-index fusion & deduplication
+    │   ├── blocker.py                  # High-throughput candidate blocker engine
+    │   ├── compkeys.py                 # Multi-field composite key generator
+    │   └── index.py                    # Memory-mapped CSR inverted index
     ├── features/
-    │   ├── __init__.py
-    │   └── feature_extractor.py        # 40+ string, token, number, and phonetic features
+    │   └── feature_extractor.py        # 33 Vectorized RapidFuzz & numeric features
     ├── models/
-    │   ├── __init__.py
-    │   ├── gbdt_ranker.py              # LightGBM / CatBoost ranking model
-    │   └── cross_encoder.py            # DeBERTa-v3 pairwise match scorer
+    │   └── gbdt_ranker.py              # LightGBM pairwise matcher & threshold tuner
     ├── evaluation/
-    │   ├── __init__.py
-    │   └── metrics.py                  # Exact Macro F0.5 & singleton scoring engine
-    └── pipeline.py                     # Unified end-to-end execution script
+    │   └── metrics.py                  # Exact Macro F0.5 scoring engine
+    └── pipeline.py                     # Master end-to-end execution runner
 ```
 
 ---
@@ -128,25 +124,32 @@ Amazon_ML_Challenge/
 git clone https://github.com/Srisai16/Amazon_ML_Challenge.git
 cd Amazon_ML_Challenge
 
-# Create and activate virtual environment
-python -m venv venv
-# On Windows:
-venv\Scripts\activate
-# On Linux/macOS:
-source venv/bin/activate
-
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Run Validation on Baseline
+### 2. Pre-encode Raw TSV Datasets to Binary Cache
 ```bash
-python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/test
+python scripts/build_cache.py
 ```
 
-### 3. Run End-to-End Pipeline
+### 3. Train Model & Optimize Threshold
 ```bash
-python -m src.pipeline --mode full --train-dir dataset/train --test-dir dataset/test --output-dir output/
+python scripts/train_ranker.py --n-queries 30000 --model-out saved_models/gbdt_model.pkl
+```
+
+### 4. Run End-to-End Pipeline & Generate Test Submission
+```bash
+python -m src.pipeline --cache-root cache --output-dir output
+```
+
+### 5. Verify Submission Files & Build Zip Package
+```bash
+# Run strict competition validator
+python utils/validate_submission.py --matching output/matching_results.tsv --candidate output/candidate_pairs.tsv --test-dir dataset/student_resource/dataset/test --check-ids
+
+# Build final submission zip
+python scripts/package_submission.py
 ```
 
 ---

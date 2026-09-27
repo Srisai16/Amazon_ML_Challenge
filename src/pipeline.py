@@ -1,156 +1,194 @@
 """
-Master Pipeline Runner for Amazon ML Challenge 2026.
-Executes End-to-End Data Ingestion -> Blocking -> Feature Extraction -> Modeling -> Validation.
+Master End-to-End Execution Pipeline for Amazon ML Challenge 2026.
+Executes High-Recall Candidate Generation -> Vectorized Feature Extraction -> GBDT Matching -> Format Validation.
 """
 
 import argparse
 import os
 import sys
-from typing import Dict, List, Set, Tuple
-import pandas as pd
-from sklearn.model_selection import train_test_split
+import time
+from typing import Dict, List, Set
 
-from src.blocking.hybrid_blocker import HybridBlocker
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+
+from src.blocking.blocker import RareTokenBlocker
 from src.config import cfg
-from src.evaluation.metrics import compute_blocking_metrics, compute_macro_f05
+from src.data.loader import fld
 from src.features.feature_extractor import FeatureExtractor
 from src.models.gbdt_ranker import GBDTRanker
 from utils.validate_submission import validate
 
 
-def load_dataset(data_dir: str, is_train: bool = True) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, Optional[Dict[str, Set[str]]]]:
-    """Loads source1, source2, source3, and ground_truth TSV files with explicit tab separator."""
-    prefix = "train" if is_train else "test"
-    s1_path = os.path.join(data_dir, f"{prefix}_source1.tsv")
-    s2_path = os.path.join(data_dir, f"{prefix}_source2.tsv")
-    s3_path = os.path.join(data_dir, f"{prefix}_source3.tsv")
-
-    print(f"Loading data from {data_dir} (is_train={is_train})...")
-    df_s1 = pd.read_csv(s1_path, sep="\t", dtype=str).fillna("")
-    df_s2 = pd.read_csv(s2_path, sep="\t", dtype=str).fillna("")
-    df_s3 = pd.read_csv(s3_path, sep="\t", dtype=str).fillna("")
-
-    ground_truth = None
-    if is_train:
-        gt_path = os.path.join(data_dir, "train_ground_truth.tsv")
-        df_gt = pd.read_csv(gt_path, sep="\t", dtype=str).fillna("")
-        ground_truth = {}
-        for _, row in df_gt.iterrows():
-            s1_id = row["source1_entity_id"]
-            raw_m = str(row["matched_entity_ids"]).strip()
-            matches = {m.strip() for m in raw_m.split(",") if m.strip()} if raw_m else set()
-            ground_truth[s1_id] = matches
-
-    return df_s1, df_s2, df_s3, ground_truth
-
-
-def run_pipeline(train_dir: str, test_dir: str, output_dir: str, max_candidates: int = 25):
+def run_test_inference(
+    cache_root: str,
+    output_dir: str,
+    model_path: str,
+    test_data_dir: str,
+    top_k: int = 30,
+    block_size: int = 10_000,
+    match_threshold: float = 0.65,
+    force_build_index: bool = False,
+):
     os.makedirs(output_dir, exist_ok=True)
     matching_out = os.path.join(output_dir, "matching_results.tsv")
     candidate_out = os.path.join(output_dir, "candidate_pairs.tsv")
 
-    print("=" * 75)
-    print("🚀 Starting Amazon ML Challenge 2026 End-to-End Pipeline")
-    print("=" * 75)
+    print("=" * 80)
+    print(">>> Starting Amazon ML Challenge 2026 End-to-End Inference Pipeline")
+    print("=" * 80)
 
-    # 1. Load Training Data
-    train_s1, train_s2, train_s3, train_gt = load_dataset(train_dir, is_train=True)
-    train_targets = pd.concat([train_s2, train_s3], ignore_index=True)
-    print(f"Train Source 1 records: {len(train_s1)} | Target pool (S2+S3): {len(train_targets)}")
-
-    # 2. Train/Val Split for Local CV
-    s1_train_ids, s1_val_ids = train_test_split(
-        train_s1["entity_id"].tolist(),
-        test_size=0.2,
-        random_state=cfg.SEED
-    )
-    df_s1_train = train_s1[train_s1["entity_id"].isin(s1_train_ids)].copy()
-    df_s1_val = train_s1[train_s1["entity_id"].isin(s1_val_ids)].copy()
-    val_gt = {s1_id: train_gt.get(s1_id, set()) for s1_id in s1_val_ids}
-
-    # 3. Blocking / Candidate Generation
-    print("\n--- STAGE 1: Candidate Generation (Blocking) ---")
-    blocker = HybridBlocker(max_candidates_per_s1=max_candidates)
-    blocker.fit(train_targets)
-
-    train_cands = blocker.block_all(df_s1_train)
-    val_cands = blocker.block_all(df_s1_val)
-
-    # Evaluate validation blocking metrics
-    block_metrics = compute_blocking_metrics(val_gt, val_cands, len(train_targets))
-    print(f"Validation Blocking Recall Ceiling: {block_metrics['pair_completeness_recall']:.4f}")
-    print(f"Validation Average Candidates / S1: {block_metrics['avg_candidates_per_s1']:.2f}")
-    print(f"Validation Reduction Ratio:         {block_metrics['reduction_ratio']:.6f}")
-
-    # 4. Feature Extraction
-    print("\n--- STAGE 2: Multi-Modal Feature Extraction ---")
-    extractor = FeatureExtractor()
-    s1_dict = train_s1.set_index("entity_id").to_dict("index")
-    target_dict = train_targets.set_index("entity_id").to_dict("index")
-
-    X_train, y_train, train_pairs = extractor.extract_candidate_dataset_features(
-        s1_dict, target_dict, train_cands, train_gt
-    )
-    X_val, y_val, val_pairs = extractor.extract_candidate_dataset_features(
-        s1_dict, target_dict, val_cands, val_gt
-    )
-    print(f"Training Features Matrix:   {X_train.shape} (Positives: {sum(y_train)})")
-    print(f"Validation Features Matrix: {X_val.shape} (Positives: {sum(y_val)})")
-
-    # 5. GBDT Ranker Training & Threshold Optimization for Macro F0.5
-    print("\n--- STAGE 3: GBDT Model Training & F0.5 Threshold Tuning ---")
+    # 1. Load Model
     ranker = GBDTRanker()
-    ranker.train(X_train, y_train, X_val, y_val)
+    if os.path.exists(model_path):
+        ranker.load(model_path)
+    else:
+        print(f"Warning: Model not found at {model_path}. Using default threshold {match_threshold}")
+        ranker.optimal_threshold = match_threshold
 
-    val_probs = ranker.predict_proba(X_val)
-    best_t = ranker.optimize_threshold(val_probs, val_pairs, val_gt, s1_val_ids)
+    threshold = match_threshold or ranker.optimal_threshold
+    print(f"Using match decision threshold: {threshold:.3f}")
 
-    # 6. Test Inference & Final Packaging
-    print("\n--- STAGE 4: Test Ingestion, Candidate Generation & Prediction ---")
-    test_s1, test_s2, test_s3, _ = load_dataset(test_dir, is_train=False)
-    test_targets = pd.concat([test_s2, test_s3], ignore_index=True)
+    # 2. Setup Test Cache Paths & Entity IDs
+    s1_dir = os.path.join(cache_root, "test", "s1")
+    s2_dir = os.path.join(cache_root, "test", "s2")
+    s3_dir = os.path.join(cache_root, "test", "s3")
 
-    test_blocker = HybridBlocker(max_candidates_per_s1=max_candidates)
-    test_blocker.fit(test_targets)
-    test_candidates = test_blocker.block_all(test_s1)
+    s1_ids = np.load(fld(s1_dir, "id"), mmap_mode="r")
+    s2_ids = np.load(fld(s2_dir, "id"), mmap_mode="r")
+    s3_ids = np.load(fld(s3_dir, "id"), mmap_mode="r")
 
-    # Save candidate_pairs.tsv
-    test_blocker.save_candidate_pairs_tsv(test_candidates, candidate_out)
+    n_s1 = len(s1_ids)
+    n2 = len(s2_ids)
+    n3 = len(s3_ids)
+    n_targets = n2 + n3
 
-    # Test Feature Extraction & Prediction
-    test_s1_dict = test_s1.set_index("entity_id").to_dict("index")
-    test_target_dict = test_targets.set_index("entity_id").to_dict("index")
+    print(f"Test Set Summary: S1={n_s1:,} queries | S2={n2:,} | S3={n3:,} | Total Targets={n_targets:,}")
 
-    X_test, _, test_pairs = extractor.extract_candidate_dataset_features(
-        test_s1_dict, test_target_dict, test_candidates
-    )
-    test_probs = ranker.predict_proba(X_test)
-    test_predictions = ranker.generate_predictions(
-        test_probs, test_pairs, test_s1["entity_id"].tolist(), threshold=best_t
-    )
+    # 3. Build/Load Test Blocker Index
+    print("\n--- STAGE 1: Candidate Generation (Blocking Index Build) ---")
+    t0_idx = time.time()
+    blocker = RareTokenBlocker(cache_root, "test", top_k=top_k).build(force=force_build_index, verbose=True)
+    print(f"Test blocking index ready in {time.time() - t0_idx:.1f}s")
 
-    # Save matching_results.tsv
-    ranker.save_matching_results_tsv(test_predictions, matching_out)
+    # 4. Stream Inference across Test Queries
+    print(f"\n--- STAGE 2: Streaming Candidate Generation & Match Prediction ({n_s1:,} queries) ---")
+    extractor = FeatureExtractor()
 
-    # 7. Self-Validation
-    print("\n--- STAGE 5: Strict Submission Format Validation ---")
-    errors, warnings = validate(matching_out, candidate_out, test_dir)
+    t0_inf = time.time()
+    total_cand_pairs = 0
+    total_matches = 0
+    total_singletons = 0
+
+    with open(candidate_out, "w", encoding="utf-8") as f_cand, \
+         open(matching_out, "w", encoding="utf-8") as f_match:
+
+        # Write TSV Headers
+        f_cand.write("source1_entity_id\tcandidate_entity_ids\n")
+        f_match.write("source1_entity_id\tmatched_entity_ids\n")
+
+        def decode_tgt_id(tgt_idx: int) -> str:
+            if tgt_idx < n2:
+                return s2_ids[tgt_idx].decode("utf-8", "ignore").strip()
+            else:
+                return s3_ids[tgt_idx - n2].decode("utf-8", "ignore").strip()
+
+        for lo in range(0, n_s1, block_size):
+            hi = min(lo + block_size, n_s1)
+            b_len = hi - lo
+
+            # Block current chunk
+            r, c, v = blocker.block_range(lo, hi)
+
+            # Map candidates per local query in chunk
+            cands_per_query: Dict[int, List[int]] = {i: [] for i in range(b_len)}
+            for local_q, tgt_idx in zip(r.tolist(), c.tolist()):
+                cands_per_query[local_q].append(tgt_idx)
+
+            # Extract features & predict for candidates in chunk
+            matched_per_query: Dict[int, List[int]] = {i: [] for i in range(b_len)}
+            if len(r) > 0:
+                q_global = r + lo
+                X_batch = extractor.extract_batch_from_cache(cache_root, "test", q_global, c, v)
+                probs = ranker.predict_proba(X_batch)
+
+                for local_q, tgt_idx, p in zip(r.tolist(), c.tolist(), probs.tolist()):
+                    if p >= threshold:
+                        matched_per_query[local_q].append(tgt_idx)
+
+            # Write results for each query in this block
+            for local_i in range(b_len):
+                global_q = lo + local_i
+                s1_eid = s1_ids[global_q].decode("utf-8", "ignore").strip()
+
+                cand_tgt_ids = [decode_tgt_id(t) for t in cands_per_query[local_i]]
+                match_tgt_ids = [decode_tgt_id(t) for t in matched_per_query[local_i]]
+
+                # Ensure candidate uniqueness and match subset constraint
+                cand_unique = list(dict.fromkeys(cand_tgt_ids))
+                match_unique = list(dict.fromkeys(match_tgt_ids))
+
+                total_cand_pairs += len(cand_unique)
+                total_matches += len(match_unique)
+                if not match_unique:
+                    total_singletons += 1
+
+                f_cand.write(f"{s1_eid}\t{','.join(cand_unique)}\n")
+                f_match.write(f"{s1_eid}\t{','.join(match_unique)}\n")
+
+            if (hi % 100_000 == 0) or (hi == n_s1):
+                el = time.time() - t0_inf
+                q_per_sec = hi / max(1e-5, el)
+                print(f"  Processed {hi:,}/{n_s1:,} queries ({hi/n_s1:.1%}) | "
+                      f"Speed: {q_per_sec:,.0f} q/s | "
+                      f"Cand/q: {total_cand_pairs/hi:.1f} | "
+                      f"Matches/q: {total_matches/hi:.2f} | "
+                      f"Singletons: {total_singletons/hi:.1%}", flush=True)
+
+    elapsed = time.time() - t0_inf
+    print(f"\nInference completed in {elapsed:.1f}s ({n_s1/max(1e-5, elapsed):,.0f} queries/sec)")
+    print(f"Candidate output: {candidate_out} ({total_cand_pairs:,} total candidate pairs)")
+    print(f"Matching output:  {matching_out} ({total_matches:,} total matches, {total_singletons:,} singletons)")
+
+    # 5. Strict Competition Format Validation
+    print("\n--- STAGE 3: Strict Submission Format Validation ---")
+    errors, warnings = validate(matching_out, candidate_out, test_data_dir)
     if errors:
-        print(f"❌ Pipeline finished with validation errors! Please review.")
+        print(f"[ERROR] Submission validation failed with {len(errors)} errors:")
+        for err in errors[:10]:
+            print(f"  - {err}")
         sys.exit(1)
     else:
-        print("🎉 SUCCESS! Submission files generated, validated, and ready for upload!")
+        print("[SUCCESS] PASS: All competition format, singleton, subset, and schema constraints PASSED!")
+        if warnings:
+            print(f"[INFO] {len(warnings)} non-fatal warnings reported:")
+            for w in warnings[:5]:
+                print(f"  - {w}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Amazon ML Challenge 2026 Pipeline")
-    parser.add_argument("--train-dir", default=cfg.paths.TRAIN_DIR, help="Path to train data directory")
-    parser.add_argument("--test-dir", default=cfg.paths.TEST_DIR, help="Path to test data directory")
-    parser.add_argument("--output-dir", default=cfg.paths.OUTPUT_DIR, help="Path to output directory")
-    parser.add_argument("--max-candidates", type=int, default=cfg.blocking.MAX_CANDIDATES_PER_SOURCE1)
+    parser = argparse.ArgumentParser(description="Amazon ML Challenge 2026 Pipeline Runner")
+    parser.add_argument("--cache-root", default=r"S:\Amazon_ML_Challenge\cache", help="Path to cache directory")
+    parser.add_argument("--test-dir", default=r"S:\Amazon_ML_Challenge\dataset\student_resource\dataset\test", help="Path to test data directory")
+    parser.add_argument("--output-dir", default=r"S:\Amazon_ML_Challenge\output", help="Path to output directory")
+    parser.add_argument("--model-path", default=r"S:\Amazon_ML_Challenge\saved_models\gbdt_model.pkl", help="Path to saved GBDT model")
+    parser.add_argument("--top-k", type=int, default=30, help="Max candidates per query from blocker")
+    parser.add_argument("--match-threshold", type=float, default=0.65, help="Decision threshold for match prediction")
+    parser.add_argument("--block-size", type=int, default=10_000, help="Query batch size for streaming")
+    parser.add_argument("--force-build-index", action="store_true", help="Force rebuild candidate index")
     args = parser.parse_args()
 
-    run_pipeline(args.train_dir, args.test_dir, args.output_dir, args.max_candidates)
+    run_test_inference(
+        cache_root=args.cache_root,
+        output_dir=args.output_dir,
+        model_path=args.model_path,
+        test_data_dir=args.test_dir,
+        top_k=args.top_k,
+        block_size=args.block_size,
+        match_threshold=args.match_threshold,
+        force_build_index=args.force_build_index,
+    )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Amazon ML Challenge 2026: Methodology & Approach Document
 
 **Track:** Business Entity Resolution  
-**Team Name:** Team Antigravity (Srisai16 & Team)  
+**Team Name:** Team Technocrats  
 **Target Metric:** Macro-averaged $F_{0.5}$ Score & Reduction Ratio  
 
 ---

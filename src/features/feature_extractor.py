@@ -1,178 +1,257 @@
 """
 High-Precision Multi-Modal Feature Extraction Module for Entity Pairs.
-Computes 40+ tabular features comparing business name, address, numbers, and country.
+Optimized for memory-mapped arrays and ultra-fast C-speed RapidFuzz execution.
 """
 
-import math
+import os
 import re
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
+import jellyfish
 import numpy as np
 import pandas as pd
+from rapidfuzz import distance, fuzz
 
-from rapidfuzz import fuzz, distance
-import jellyfish
+from src.data import fastnorm as fn
+from src.data.loader import fld
 
-from src.preprocessing.normalizer import normalizer
+FEATURE_NAMES = [
+    "blocking_score",
+    "is_same_country",
+    "is_source2",
+    "name_len_diff",
+    "name_len_ratio",
+    "addr_len_diff",
+    "addr_len_ratio",
+    "name_fuzz_ratio",
+    "name_partial_ratio",
+    "name_token_sort_ratio",
+    "name_token_set_ratio",
+    "name_wratio",
+    "name_jaro_winkler",
+    "addr_fuzz_ratio",
+    "addr_partial_ratio",
+    "addr_token_sort_ratio",
+    "addr_token_set_ratio",
+    "addr_jaro_winkler",
+    "name_token_jaccard",
+    "name_token_overlap",
+    "addr_token_jaccard",
+    "addr_token_overlap",
+    "name_3gram_jaccard",
+    "num_shared_numbers",
+    "has_conflicting_numbers",
+    "number_jaccard",
+    "postal_match",
+    "postal_mismatch",
+    "first_word_match",
+    "first_word_jw",
+    "first_word_soundex",
+    "name_addr_fuzz_prod",
+    "name_addr_jw_prod",
+]
 
 
 class FeatureExtractor:
     def __init__(self):
-        pass
+        self.feature_names = FEATURE_NAMES
 
-    def _get_jaccard_similarity(self, set1: Set[str], set2: Set[str]) -> float:
-        if not set1 or not set2:
+    @staticmethod
+    def _jaccard(s1: Set[str], s2: Set[str]) -> float:
+        if not s1 or not s2:
             return 0.0
-        intersection = len(set1.intersection(set2))
-        union = len(set1.union(set2))
-        return intersection / union if union > 0 else 0.0
+        inter = len(s1.intersection(s2))
+        union = len(s1.union(s2))
+        return inter / union if union > 0 else 0.0
 
-    def _get_overlap_coefficient(self, set1: Set[str], set2: Set[str]) -> float:
-        if not set1 or not set2:
+    @staticmethod
+    def _overlap(s1: Set[str], s2: Set[str]) -> float:
+        if not s1 or not s2:
             return 0.0
-        intersection = len(set1.intersection(set2))
-        min_len = min(len(set1), len(set2))
-        return intersection / min_len if min_len > 0 else 0.0
+        inter = len(s1.intersection(s2))
+        m = min(len(s1), len(s2))
+        return inter / m if m > 0 else 0.0
 
-    def _get_char_ngrams(self, text: str, n: int = 3) -> Set[str]:
-        if not text or len(text) < n:
-            return set()
-        return {text[i:i+n] for i in range(len(text) - n + 1)}
+    @staticmethod
+    def _char_3grams(text: str) -> Set[str]:
+        if len(text) < 3:
+            return {text} if text else set()
+        return {text[i:i + 3] for i in range(len(text) - 2)}
 
-    def extract_pair_features(self, s1_rec: Dict, target_rec: Dict) -> Dict[str, float]:
-        """
-        Computes comprehensive similarity features for a single (S1, Target) entity pair.
-        """
-        feats = {}
-
-        # 1. Clean & Normalized strings
-        raw_name1 = str(s1_rec.get("business_name", ""))
-        raw_name2 = str(target_rec.get("business_name", ""))
-        name1 = normalizer.normalize_business_name(raw_name1)
-        name2 = normalizer.normalize_business_name(raw_name2)
-        name1_no_legal = normalizer.normalize_business_name(raw_name1, remove_legal=True)
-        name2_no_legal = normalizer.normalize_business_name(raw_name2, remove_legal=True)
-
-        raw_addr1 = str(s1_rec.get("business_address", ""))
-        raw_addr2 = str(target_rec.get("business_address", ""))
-        addr1 = normalizer.normalize_address(raw_addr1)
-        addr2 = normalizer.normalize_address(raw_addr2)
-
-        country1 = str(s1_rec.get("country", "")).strip().lower()
-        country2 = str(target_rec.get("country", "")).strip().lower()
-
-        target_id = str(target_rec.get("entity_id", ""))
-
-        # 2. Basic Metadata & Source Indicators
-        feats["is_same_country"] = 1.0 if country1 and country2 and (country1 == country2) else 0.0
-        feats["is_source2"] = 1.0 if target_id.startswith("S2-") else 0.0
-        feats["is_source3"] = 1.0 if target_id.startswith("S3-") else 0.0
-
-        # Length features
-        len_name1, len_name2 = len(name1), len(name2)
-        feats["name_len_diff"] = abs(len_name1 - len_name2)
-        feats["name_len_ratio"] = min(len_name1, len_name2) / max(len_name1, len_name2, 1)
-
-        len_addr1, len_addr2 = len(addr1), len(addr2)
-        feats["addr_len_diff"] = abs(len_addr1 - len_addr2)
-        feats["addr_len_ratio"] = min(len_addr1, len_addr2) / max(len_addr1, len_addr2, 1)
-
-        # 3. Business Name String Similarities (RapidFuzz / Levenshtein / Jaro-Winkler)
-        feats["name_fuzz_ratio"] = fuzz.ratio(name1, name2) / 100.0
-        feats["name_partial_ratio"] = fuzz.partial_ratio(name1, name2) / 100.0
-        feats["name_token_sort_ratio"] = fuzz.token_sort_ratio(name1, name2) / 100.0
-        feats["name_token_set_ratio"] = fuzz.token_set_ratio(name1, name2) / 100.0
-        feats["name_wratio"] = fuzz.WRatio(name1, name2) / 100.0
-        feats["name_jaro_winkler"] = distance.JaroWinkler.similarity(name1, name2)
-
-        # Without legal suffix
-        feats["name_no_legal_fuzz_ratio"] = fuzz.ratio(name1_no_legal, name2_no_legal) / 100.0
-        feats["name_no_legal_token_sort"] = fuzz.token_sort_ratio(name1_no_legal, name2_no_legal) / 100.0
-
-        # 4. Business Address String Similarities
-        feats["addr_fuzz_ratio"] = fuzz.ratio(addr1, addr2) / 100.0
-        feats["addr_partial_ratio"] = fuzz.partial_ratio(addr1, addr2) / 100.0
-        feats["addr_token_sort_ratio"] = fuzz.token_sort_ratio(addr1, addr2) / 100.0
-        feats["addr_token_set_ratio"] = fuzz.token_set_ratio(addr1, addr2) / 100.0
-        feats["addr_jaro_winkler"] = distance.JaroWinkler.similarity(addr1, addr2)
-
-        # 5. Token Overlap & Set Metrics
-        name1_tokens = set(name1.split())
-        name2_tokens = set(name2.split())
-        feats["name_token_jaccard"] = self._get_jaccard_similarity(name1_tokens, name2_tokens)
-        feats["name_token_overlap"] = self._get_overlap_coefficient(name1_tokens, name2_tokens)
-
-        addr1_tokens = set(addr1.split())
-        addr2_tokens = set(addr2.split())
-        feats["addr_token_jaccard"] = self._get_jaccard_similarity(addr1_tokens, addr2_tokens)
-        feats["addr_token_overlap"] = self._get_overlap_coefficient(addr1_tokens, addr2_tokens)
-
-        # 6. Character N-Gram Similarities (3-gram and 4-gram)
-        name1_3g = self._get_char_ngrams(name1, 3)
-        name2_3g = self._get_char_ngrams(name2, 3)
-        feats["name_3gram_jaccard"] = self._get_jaccard_similarity(name1_3g, name2_3g)
-
-        name1_4g = self._get_char_ngrams(name1, 4)
-        name2_4g = self._get_char_ngrams(name2, 4)
-        feats["name_4gram_jaccard"] = self._get_jaccard_similarity(name1_4g, name2_4g)
-
-        # 7. Exact Number & House / Suite Match (CRITICAL for Entity Resolution)
-        nums1 = normalizer.extract_numbers(raw_addr1)
-        nums2 = normalizer.extract_numbers(raw_addr2)
-        common_nums = nums1.intersection(nums2)
-
-        feats["num_shared_numbers"] = float(len(common_nums))
-        feats["has_conflicting_numbers"] = 1.0 if nums1 and nums2 and not common_nums else 0.0
-        feats["number_jaccard"] = self._get_jaccard_similarity(nums1, nums2)
-
-        # 8. Postal Code Match
-        pc1 = normalizer.extract_postal_code(raw_addr1, country1)
-        pc2 = normalizer.extract_postal_code(raw_addr2, country2)
-        feats["postal_code_exact_match"] = 1.0 if pc1 and pc2 and (pc1 == pc2) else 0.0
-        feats["postal_code_mismatch"] = 1.0 if pc1 and pc2 and (pc1 != pc2) else 0.0
-
-        # 9. Phonetic Soundex & Metaphone Similarities
-        try:
-            tok1 = name1.split()[0] if name1.split() else ""
-            tok2 = name2.split()[0] if name2.split() else ""
-            feats["first_token_soundex_match"] = 1.0 if tok1 and tok2 and (jellyfish.soundex(tok1) == jellyfish.soundex(tok2)) else 0.0
-            feats["first_token_metaphone_match"] = 1.0 if tok1 and tok2 and (jellyfish.metaphone(tok1) == jellyfish.metaphone(tok2)) else 0.0
-        except Exception:
-            feats["first_token_soundex_match"] = 0.0
-            feats["first_token_metaphone_match"] = 0.0
-
-        # 10. Multi-Field Compound Interaction Scores
-        feats["name_addr_fuzz_prod"] = feats["name_token_set_ratio"] * feats["addr_token_set_ratio"]
-        feats["name_addr_jw_prod"] = feats["name_jaro_winkler"] * feats["addr_jaro_winkler"]
-
-        return feats
-
-    def extract_candidate_dataset_features(
+    def extract_pair_vector(
         self,
-        s1_records: Dict[str, Dict],
-        target_records: Dict[str, Dict],
-        candidate_mapping: Dict[str, List[str]],
-        ground_truth: Optional[Dict[str, Set[str]]] = None
-    ) -> Tuple[pd.DataFrame, Optional[np.ndarray], List[str]]:
+        name1: str,
+        addr1: str,
+        country1: int,
+        name2: str,
+        addr2: str,
+        country2: int,
+        is_s2: float,
+        block_score: float = 0.0,
+    ) -> List[float]:
+        """Computes similarity feature vector for a single pair of normalized strings."""
+        len_n1, len_n2 = len(name1), len(name2)
+        len_a1, len_a2 = len(addr1), len(addr2)
+
+        # Country match (0 is UNKNOWN)
+        if country1 != 0 and country2 != 0:
+            is_same_country = 1.0 if country1 == country2 else 0.0
+        else:
+            is_same_country = 1.0
+
+        # RapidFuzz string similarities
+        name_fuzz = fuzz.ratio(name1, name2) / 100.0
+        name_partial = fuzz.partial_ratio(name1, name2) / 100.0
+        name_token_sort = fuzz.token_sort_ratio(name1, name2) / 100.0
+        name_token_set = fuzz.token_set_ratio(name1, name2) / 100.0
+        name_wratio = fuzz.WRatio(name1, name2) / 100.0
+        name_jw = distance.JaroWinkler.similarity(name1, name2)
+
+        addr_fuzz = fuzz.ratio(addr1, addr2) / 100.0
+        addr_partial = fuzz.partial_ratio(addr1, addr2) / 100.0
+        addr_token_sort = fuzz.token_sort_ratio(addr1, addr2) / 100.0
+        addr_token_set = fuzz.token_set_ratio(addr1, addr2) / 100.0
+        addr_jw = distance.JaroWinkler.similarity(addr1, addr2)
+
+        # Token set metrics
+        n_toks1 = set(name1.split())
+        n_toks2 = set(name2.split())
+        name_jacc = self._jaccard(n_toks1, n_toks2)
+        name_over = self._overlap(n_toks1, n_toks2)
+
+        a_toks1 = set(addr1.split())
+        a_toks2 = set(addr2.split())
+        addr_jacc = self._jaccard(a_toks1, a_toks2)
+        addr_over = self._overlap(a_toks1, a_toks2)
+
+        # 3-gram jaccard
+        g1 = self._char_3grams(name1)
+        g2 = self._char_3grams(name2)
+        name_3g = self._jaccard(g1, g2)
+
+        # Numbers & postal
+        nums1 = {t for t in a_toks1 if t.isdigit()}
+        nums2 = {t for t in a_toks2 if t.isdigit()}
+        common_nums = nums1.intersection(nums2)
+        num_shared = float(len(common_nums))
+        has_conflict = 1.0 if (nums1 and nums2 and not common_nums) else 0.0
+        num_jacc = self._jaccard(nums1, nums2)
+
+        p1 = {t for t in nums1 if len(t) in (5, 6)}
+        p2 = {t for t in nums2 if len(t) in (5, 6)}
+        if p1 and p2:
+            p_match = 1.0 if p1.intersection(p2) else 0.0
+            p_mismatch = 1.0 - p_match
+        else:
+            p_match = 0.0
+            p_mismatch = 0.0
+
+        # First word
+        w1 = name1.split()[0] if name1 else ""
+        w2 = name2.split()[0] if name2 else ""
+        first_match = 1.0 if (w1 and w2 and w1 == w2) else 0.0
+        first_jw = distance.JaroWinkler.similarity(w1, w2) if (w1 and w2) else 0.0
+
+        try:
+            first_snd = 1.0 if (w1 and w2 and jellyfish.soundex(w1) == jellyfish.soundex(w2)) else 0.0
+        except Exception:
+            first_snd = 0.0
+
+        # Interaction scores
+        name_addr_fuzz = name_token_set * addr_token_set
+        name_addr_jw = name_jw * addr_jw
+
+        return [
+            block_score,
+            is_same_country,
+            is_s2,
+            float(abs(len_n1 - len_n2)),
+            min(len_n1, len_n2) / max(len_n1, len_n2, 1),
+            float(abs(len_a1 - len_a2)),
+            min(len_a1, len_a2) / max(len_a1, len_a2, 1),
+            name_fuzz,
+            name_partial,
+            name_token_sort,
+            name_token_set,
+            name_wratio,
+            name_jw,
+            addr_fuzz,
+            addr_partial,
+            addr_token_sort,
+            addr_token_set,
+            addr_jw,
+            name_jacc,
+            name_over,
+            addr_jacc,
+            addr_over,
+            name_3g,
+            num_shared,
+            has_conflict,
+            num_jacc,
+            p_match,
+            p_mismatch,
+            first_match,
+            first_jw,
+            first_snd,
+            name_addr_fuzz,
+            name_addr_jw,
+        ]
+
+    def extract_batch_from_cache(
+        self,
+        cache_root: str,
+        split: str,
+        query_rows: np.ndarray,
+        target_rows: np.ndarray,
+        scores: np.ndarray,
+    ) -> np.ndarray:
         """
-        Builds feature matrix X and label vector y for all candidate pairs.
+        Fast batch feature extraction from memory-mapped cache arrays.
         """
-        rows = []
-        labels = []
-        pair_ids = []
+        s1_dir = os.path.join(cache_root, split, "s1")
+        s2_dir = os.path.join(cache_root, split, "s2")
+        s3_dir = os.path.join(cache_root, split, "s3")
 
-        for s1_id, cand_ids in candidate_mapping.items():
-            s1_rec = s1_records.get(s1_id, {"entity_id": s1_id})
-            true_matches = ground_truth.get(s1_id, set()) if ground_truth else None
+        nm1 = np.load(fld(s1_dir, "name"), mmap_mode="r")
+        ad1 = np.load(fld(s1_dir, "addr"), mmap_mode="r")
+        c1 = np.load(fld(s1_dir, "country"), mmap_mode="r")
 
-            for t_id in cand_ids:
-                t_rec = target_records.get(t_id, {"entity_id": t_id})
-                feats = self.extract_pair_features(s1_rec, t_rec)
-                rows.append(feats)
-                pair_ids.append(f"{s1_id}::{t_id}")
+        nm2 = np.load(fld(s2_dir, "name"), mmap_mode="r")
+        ad2 = np.load(fld(s2_dir, "addr"), mmap_mode="r")
+        c2 = np.load(fld(s2_dir, "country"), mmap_mode="r")
+        n2 = len(nm2)
 
-                if true_matches is not None:
-                    labels.append(1 if t_id in true_matches else 0)
+        nm3 = np.load(fld(s3_dir, "name"), mmap_mode="r")
+        ad3 = np.load(fld(s3_dir, "addr"), mmap_mode="r")
+        c3 = np.load(fld(s3_dir, "country"), mmap_mode="r")
 
-        df_feats = pd.DataFrame(rows)
-        y = np.array(labels) if labels else None
-        return df_feats, y, pair_ids
+        n_pairs = len(query_rows)
+        X = np.zeros((n_pairs, len(self.feature_names)), dtype=np.float32)
+
+        for i in range(n_pairs):
+            qr = int(query_rows[i])
+            tr = int(target_rows[i])
+            sc = float(scores[i])
+
+            q_name = nm1[qr].decode("utf-8", "ignore")
+            q_addr = ad1[qr].decode("utf-8", "ignore")
+            q_cnt = int(c1[qr])
+
+            if tr < n2:
+                is_s2 = 1.0
+                t_name = nm2[tr].decode("utf-8", "ignore")
+                t_addr = ad2[tr].decode("utf-8", "ignore")
+                t_cnt = int(c2[tr])
+            else:
+                is_s2 = 0.0
+                idx = tr - n2
+                t_name = nm3[idx].decode("utf-8", "ignore")
+                t_addr = ad3[idx].decode("utf-8", "ignore")
+                t_cnt = int(c3[idx])
+
+            X[i] = self.extract_pair_vector(
+                q_name, q_addr, q_cnt,
+                t_name, t_addr, t_cnt,
+                is_s2, sc
+            )
+
+        return X
